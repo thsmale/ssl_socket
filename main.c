@@ -5,20 +5,74 @@
 #include <netdb.h>
 #include <string.h>
 #include <unistd.h>
+#include <openssl/ssl.h>
 
 #define BUF_LEN 256
 
+int set_socket(char *host, char *endpt, char *service); 
+int ssl(char *host, char *endpt);
+char* get_req(char *host, char *endpt); 
+
 int main(int argc, char **argv) {
-	int err = 0;
-	int fd = 0;
 	//Set URL
-	/*
-	 * TODO: Add SSL support for https requests
 	char *host = "api.fiscaldata.treasury.gov\0";
 	char *endpt = "/services/api/fiscal_service/v1/accounting/od/schedules_fed_debt_daily_activity?filter=record_date:eq:2022-05-01\0"; 
-	*/
+	int err = ssl(host, endpt);
+	if(err < 0) {
+		fprintf(stderr, "ssl failed\n");
+		return -1; 
+	}
+	/*
 	char *host = "www.google.com\0";
 	char *endpt = "/index.html\0";
+	int fd = set_socket(host, endpt); int err = 0; 
+	if(fd < 0) {
+		fprintf(stderr, "Failed to make socket\n");
+		return -1; 
+	}
+	//Send the GET request to the server
+	int bytes = 0; 
+	int bytes_sent = 0;
+	char buffer[BUF_LEN];
+	//CLRF: Moves cursor to beginning of next line
+	err = snprintf(buffer, BUF_LEN, 
+		 "GET %s HTTP/1.1 \r\nHost: %s \r\nConnection: close\r\n\r\n",
+		 endpt, host);
+	if(err < 0) {
+		fprintf(stderr, "snprintf\n");
+		close(fd);
+		return -1; 
+	}
+	while(bytes_sent < strlen(buffer)) {
+		bytes = send(fd, &buffer, strlen(buffer), 0);
+		if(bytes == -1) {
+			perror("send ");
+			close(fd);
+			return -1;
+		}
+		bytes_sent += bytes;
+	}
+	memset(buffer, 0, BUF_LEN);
+	//Recieve the data from the server
+	bytes = 1;
+	while(bytes != 0) {
+		bytes = recv(fd, &buffer, BUF_LEN, 0);
+		if(bytes == -1) {
+			perror("recv ");
+			close(fd);
+			return -1;
+		}
+		printf("%s", buffer);
+		memset(buffer, 0, BUF_LEN);
+	}
+	close(fd);
+	*/
+	return 0;
+}
+
+int set_socket(char *host, char *endpt, char *service) {
+	int err = 0;
+	int fd = -1;
 	//Configure everything for connection to server
 	struct addrinfo hints, *res; 
 	//Init everything to zero
@@ -26,7 +80,7 @@ int main(int argc, char **argv) {
 	hints.ai_family = PF_UNSPEC; 
 	hints.ai_socktype = SOCK_STREAM;
 	//Get list of IP addresses and port numbers for host name
-	err = getaddrinfo(host, "http", &hints, &res);
+	err = getaddrinfo(host, service, &hints, &res);
 	if(err != 0) {
 		const char *msg = gai_strerror(err); 
 		fprintf(stderr, "getaddrinfo: %s\n", msg);
@@ -52,50 +106,110 @@ int main(int argc, char **argv) {
 		//We have a successful web socket
 		break;
 	}
-	if(fd < 0) {
-		fprintf(stderr, "Failed to make socket\n");
-		freeaddrinfo(res);
+	freeaddrinfo(res);
+	return fd; 
+}
+
+int ssl(char *host, char *endpt) {
+	SSL_library_init(); 
+	const SSL_METHOD *meth = TLS_client_method();
+	if(meth == NULL) {
+		fprintf(stderr, "Failed to negotiate ssl version\n");
 		return -1; 
 	}
-	//Send the GET request to the server
-	int bytes = 0; 
-	int bytes_sent = 0;
+	//ctx contains cryptographic algorithms for secure speech
+	SSL_CTX *ctx = SSL_CTX_new(meth);
+	if(ctx == NULL) {
+		fprintf(stderr, "SSL_CTX object creation failed\n");
+		return -1; 
+	}
+	int err = SSL_CTX_use_PrivateKey_file(ctx, "private_key.pem",
+					      SSL_FILETYPE_PEM);
+	if(err != 1) {
+		fprintf(stderr, "Err reading private key file\n");
+		return -1; 
+	}
+	err = SSL_CTX_check_private_key(ctx); 
+	if(err != 1) {
+		fprintf(stderr, "Priv key does not match\
+			certificate public key\n");
+		return -1; 
+	}
+	err = SSL_CTX_load_verify_locations(ctx, "public_key.pem", 
+					    NULL); 
+	if(err == 0) {
+		fprintf(stderr, "Failed to locate certificate\n");
+		return -1;
+	}
+	//Require server certificate verification
+	SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+	SSL_CTX_set_verify_depth(ctx, 1);
+	//Create Socket
+	int sock = set_socket(host, endpt, "https\0");
+	if(sock < 0) {
+		fprintf(stderr, "Failed to create socket\n");
+		return -1;
+	}
+	//Create structure to hold data necessary for TLS/SSL comm
+	SSL *ssl = SSL_new(ctx);
+	if(ssl == NULL) {
+		fprintf(stderr, "Failed to create ssl struct\n");
+		return -1;
+	}
+	err = SSL_set_fd(ssl, sock);
+	if(err == 0) {
+		fprintf(stderr, "Failed to set sock to ssl struct\n");
+		return -1; 
+	}
+	//Iniate TLS/SSL handshake with server
+	err = SSL_connect(ssl); 
+	if(err <= 0) {
+		err = SSL_get_error(ssl, err); 
+		fprintf(stderr, "SSL_connect: %i\n", err); 
+		return -1; 
+	}
+	printf("SSL connection using %s\n", SSL_get_cipher(ssl));
+	char *get = get_req(host, endpt); 
+	err = SSL_write(ssl, get, strlen(get));
+	if(err <= 0) {
+		err = SSL_get_error(ssl, err); 
+		fprintf(stderr, "SSL_write: %i\n", err);
+		return -1; 
+	}
+	free(get);
 	char buffer[BUF_LEN];
+	err = SSL_read(ssl, buffer, BUF_LEN-1);
+	if(err <= 0) {
+		err = SSL_get_error(ssl ,err); 
+		fprintf(stderr, "SSL_read: %i\n", err); 
+		return -1; 
+	}
+	printf("%s", buffer);
+	if(err == 0) { 
+		printf("bidirectional shutdown\n");
+		SSL_read(ssl, buffer, BUF_LEN-1); 
+	}else if(err < 0) {
+		err = SSL_get_error(ssl, err); 
+		fprintf(stderr, "SSL_read: %i\n", err); 
+		return -1; 
+	}
+	close(sock);
+	SSL_free(ssl); 
+	SSL_CTX_free(ctx);
+	return 1;
+}
+
+char* get_req(char *host, char *endpt) {
+	char *buffer = malloc(sizeof(char) * BUF_LEN);
 	//CLRF: Moves cursor to beginning of next line
-	err = snprintf(buffer, BUF_LEN, 
-		 "GET %s HTTP/1.1 \r\nHost: %s \r\nConnection: close\r\n\r\n",
+	int err = snprintf(buffer, BUF_LEN, 
+		 "GET %s HTTP/1.1 \r\n\
+		 Host: %s \r\n\
+		 Connection: close\r\n\r\n",
 		 endpt, host);
 	if(err < 0) {
-		fprintf(stderr, "snprintf\n");
-		close(fd);
-		freeaddrinfo(res);
-		return -1; 
+		fprintf(stderr, "GET snprintf\n");
+		return NULL; 
 	}
-	while(bytes_sent < strlen(buffer)) {
-		bytes = send(fd, &buffer, strlen(buffer), 0);
-		if(bytes == -1) {
-			perror("send ");
-			close(fd);
-			freeaddrinfo(res);
-			return -1;
-		}
-		bytes_sent += bytes;
-	}
-	memset(buffer, 0, BUF_LEN);
-	//Recieve the data from the server
-	bytes = 1;
-	while(bytes != 0) {
-		bytes = recv(fd, &buffer, BUF_LEN, 0);
-		if(bytes == -1) {
-			perror("recv ");
-			close(fd);
-			freeaddrinfo(res);
-			return -1;
-		}
-		printf("%s", buffer);
-		memset(buffer, 0, BUF_LEN);
-	}
-	close(fd);
-	freeaddrinfo(res);
-	return 0;
+	return buffer;
 }
