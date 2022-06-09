@@ -4,5 +4,5 @@ The purpose of this repo is to interact with API endpoints to get information av
 Installation of the OpenSSL library is necessary. 
 
 ```
-gcc -l ssl -l crypto
+gcc -l ssl -l crypto main.c
 ```
