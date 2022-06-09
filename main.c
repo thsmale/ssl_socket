@@ -21,6 +21,10 @@ void print_err_desc(int err);
 
 int main(int argc, char **argv) {
 	//Set URL
+	/*
+	char *host = "www.hp.com\0";
+	char *endpt = "/\0";
+	*/
 	char *host = "api.fiscaldata.treasury.gov\0";
 	char *endpt = "/services/api/fiscal_service/v1/accounting/od/schedules_fed_debt_daily_activity?filter=record_date:eq:2022-05-01\0"; 
 	int err = ssl_connect(host, endpt);
@@ -202,13 +206,14 @@ int ssl(char *host, char *endpt) {
 	}
 	free(get);
 	char buffer[BUF_LEN];
-	err = SSL_read(ssl, buffer, BUF_LEN-1);
+	SSL_read(ssl, buffer, BUF_LEN-1);
+	printf("%s", buffer);
+
 	if(err <= 0) {
 		err = SSL_get_error(ssl ,err); 
 		fprintf(stderr, "SSL_read: %i\n", err); 
 		return -1; 
 	}
-	printf("%s", buffer);
 	if(err == 0) { 
 		printf("bidirectional shutdown\n");
 		SSL_read(ssl, buffer, BUF_LEN-1); 
@@ -224,20 +229,8 @@ int ssl(char *host, char *endpt) {
 }
 
 int ssl_connect(char *host, char *endpt) {
-	//Bio is an I/O abstraction from the ossl library
-	//BIO_s_file is wrapper for stdio FILE struct
-	BIO *certbio = BIO_new(BIO_s_file()); 
-	if(certbio == NULL) {
-		fprintf(stderr, "Failed to open BIO\n");
-		return -1;
-	}
-	BIO *outbio = BIO_new_fp(stdout, BIO_NOCLOSE);
-	if(outbio == NULL) {
-		fprintf(stderr, "Failed to create stream\n");
-		return -1; 
-	}
 	if(SSL_library_init() < 0) {
-		BIO_printf(outbio, "Failed to init ossl library\n");
+		fprintf(stderr, "Failed to init ossl library\n");
 		return -1;
 	}
 	const SSL_METHOD *meth = TLS_client_method();
@@ -271,20 +264,38 @@ int ssl_connect(char *host, char *endpt) {
 	err = SSL_connect(ssl); 
 	if(err <= 0) {
 		err = SSL_get_error(ssl, err); 
-		BIO_printf(outbio, "Error: SSL_connect\n");
+		fprintf(stderr, "Error: SSL_connect\n");
 		print_err_desc(err);
 		ERR_print_errors_fp(stderr);
+		return -1;
 	}
+	printf("SSL connection using %s\n", SSL_get_cipher(ssl));
 	//Get remote certificate into X509 struct
 	X509 *cert = SSL_get_peer_certificate(ssl);
 	if(cert == NULL)
-		BIO_printf(outbio, 
-			   "Err no certificate from %s\n", host); 
+		fprintf(stderr, "Err no certificate from %s\n", host); 
 	X509_NAME *certname = X509_get_subject_name(cert);
 	if(certname == 0) 
 		fprintf(stderr, "Failed to get cert name\n");
-	else 
-		X509_NAME_print_ex(outbio, certname, 0, 0);
+	else {
+		X509_NAME_print_ex_fp(stdout, certname, 0, 0);
+		printf("\n");
+	}
+	//Send GET request for data from API endpt
+	char *get = get_req(host, endpt); 
+	err = SSL_write(ssl, get, strlen(get));
+	if(err <= 0) {
+		err = SSL_get_error(ssl, err); 
+		fprintf(stderr, "SSL_write: %i\n", err);
+		print_err_desc(err);
+		return -1; 
+	}
+	free(get);
+	//Receive data from API endpt
+	char buffer[BUF_LEN];
+	while(SSL_read(ssl, buffer, BUF_LEN-1) > 0)
+		printf("%s", buffer);
+	print_err_desc(SSL_get_error(ssl ,err)); 
 	SSL_free(ssl);
 	close(sock);
 	X509_free(cert);
@@ -292,13 +303,13 @@ int ssl_connect(char *host, char *endpt) {
 	return 1; 
 }
 
+//Connection header is sometimes necessary to otherwise recv will hang
+//Alternative solution is to parse chunked bytes header ret from server
 char* get_req(char *host, char *endpt) {
 	char *buffer = malloc(sizeof(char) * BUF_LEN);
 	//CLRF: Moves cursor to beginning of next line
 	int err = snprintf(buffer, BUF_LEN, 
-		 "GET %s HTTP/1.1 \r\n\
-		 Host: %s \r\n\
-		 Connection: close\r\n\r\n",
+		 "GET %s HTTP/1.1 \r\nHost: %s \r\nConnection: close\r\n\r\n",
 		 endpt, host);
 	if(err < 0) {
 		fprintf(stderr, "GET snprintf\n");
@@ -308,11 +319,11 @@ char* get_req(char *host, char *endpt) {
 }
 
 //Switch statement cause error's can concurrently occur
+//TODO: Make error descriptions more verbose
 void print_err_desc(int err) {
 	switch (err) {
 		case SSL_ERROR_NONE: 
-			fprintf(stderr, 
-				"TLS/SSL I/O operation completed\n"); 
+			break;
 		case SSL_ERROR_ZERO_RETURN:
 			fprintf(stderr, 
 				"Peer has closed conn for writing\n");
