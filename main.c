@@ -15,68 +15,18 @@
 
 int set_socket(char *host, char *service); 
 int ssl(char *host, char *endpt);
-int ssl_connect(char *host, char *endpt);
 char* get_req(char *host, char *endpt); 
 void print_err_desc(int err); 
 
 int main(int argc, char **argv) {
 	//Set URL
-	/*
-	char *host = "www.hp.com\0";
-	char *endpt = "/\0";
-	*/
 	char *host = "api.fiscaldata.treasury.gov\0";
 	char *endpt = "/services/api/fiscal_service/v1/accounting/od/schedules_fed_debt_daily_activity?filter=record_date:eq:2022-05-01\0"; 
-	int err = ssl_connect(host, endpt);
+	int err = ssl(host, endpt);
 	if(err < 0) {
 		fprintf(stderr, "ssl failed\n");
 		return -1; 
 	}
-	/*
-	char *host = "www.google.com\0";
-	char *endpt = "/index.html\0";
-	int fd = set_socket(host, endpt); int err = 0; 
-	if(fd < 0) {
-		fprintf(stderr, "Failed to make socket\n");
-		return -1; 
-	}
-	//Send the GET request to the server
-	int bytes = 0; 
-	int bytes_sent = 0;
-	char buffer[BUF_LEN];
-	//CLRF: Moves cursor to beginning of next line
-	err = snprintf(buffer, BUF_LEN, 
-		 "GET %s HTTP/1.1 \r\nHost: %s \r\nConnection: close\r\n\r\n",
-		 endpt, host);
-	if(err < 0) {
-		fprintf(stderr, "snprintf\n");
-		close(fd);
-		return -1; 
-	}
-	while(bytes_sent < strlen(buffer)) {
-		bytes = send(fd, &buffer, strlen(buffer), 0);
-		if(bytes == -1) {
-			perror("send ");
-			close(fd);
-			return -1;
-		}
-		bytes_sent += bytes;
-	}
-	memset(buffer, 0, BUF_LEN);
-	//Recieve the data from the server
-	bytes = 1;
-	while(bytes != 0) {
-		bytes = recv(fd, &buffer, BUF_LEN, 0);
-		if(bytes == -1) {
-			perror("recv ");
-			close(fd);
-			return -1;
-		}
-		printf("%s", buffer);
-		memset(buffer, 0, BUF_LEN);
-	}
-	close(fd);
-	*/
 	return 0;
 }
 
@@ -120,115 +70,8 @@ int set_socket(char *host, char *service) {
 	return fd; 
 }
 
+//Enables secure connections between client and server
 int ssl(char *host, char *endpt) {
-	SSL_library_init(); 
-	const SSL_METHOD *meth = TLS_client_method();
-	if(meth == NULL) {
-		fprintf(stderr, "Failed to negotiate ssl version\n");
-		return -1; 
-	}
-	//ctx contains cryptographic algorithms for secure connection 
-	SSL_CTX *ctx = SSL_CTX_new(meth);
-	if(ctx == NULL) {
-		fprintf(stderr, "SSL_CTX object creation failed\n");
-		return -1; 
-	}
-	/*
-	//Load public key 
-	//use_certificate_file chain should be perferred
-	int err = 0;
-	char *client_cert = "certs/CA_CSR.csr\0";
-	err = SSL_CTX_use_certificate_chain_file(ctx, client_cert);
-	if(err != 1) {
-		fprintf(stderr, "Err loading certificate\n");
-		return -1;
-	}
-	//Load private key
-	char *client_key= "certs/CA_private_key.pem\0";
-	err = SSL_CTX_use_PrivateKey_file(ctx, 
-					  client_key,
-					  SSL_FILETYPE_PEM);
-	if(err != 1) {
-		fprintf(stderr, "Err reading private key file\n");
-		return -1; 
-	}
-	err = SSL_CTX_check_private_key(ctx); 
-	if(err != 1) {
-		fprintf(stderr, "Priv key != cert public key\n");
-		return -1; 
-	}
-	char *client_ca_cert = "certs/certificate.arm\0";
-	err = SSL_CTX_load_verify_locations(ctx, 
-					    client_ca_cert, 
-					    NULL); 
-	if(err == 0) {
-		ERR_print_errors_fp(stderr);
-		return -1;
-	}
-	*/
-	int err = 0;
-	//Require server certificate verification
-	SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
-	SSL_CTX_set_verify_depth(ctx, 1);
-	//Create Socket
-	int sock = set_socket(host, "https\0");
-	if(sock < 0) {
-		fprintf(stderr, "Failed to create socket\n");
-		return -1;
-	}
-	//Create structure to hold data necessary for TLS/SSL comm
-	SSL *ssl = SSL_new(ctx);
-	if(ssl == NULL) {
-		fprintf(stderr, "Failed to create ssl struct\n");
-		return -1;
-	}
-	err = SSL_set_fd(ssl, sock);
-	if(err == 0) {
-		fprintf(stderr, "Failed to set sock to ssl struct\n");
-		return -1; 
-	}
-	//Iniate TLS/SSL handshake with server
-	err = SSL_connect(ssl); 
-	if(err <= 0) {
-		err = SSL_get_error(ssl, err); 
-		fprintf(stderr, "SSL_connect\n");
-		print_err_desc(err);
-		ERR_print_errors_fp(stderr);
-		return -1; 
-	}
-	printf("SSL connection using %s\n", SSL_get_cipher(ssl));
-	char *get = get_req(host, endpt); 
-	err = SSL_write(ssl, get, strlen(get));
-	if(err <= 0) {
-		err = SSL_get_error(ssl, err); 
-		fprintf(stderr, "SSL_write: %i\n", err);
-		return -1; 
-	}
-	free(get);
-	char buffer[BUF_LEN];
-	SSL_read(ssl, buffer, BUF_LEN-1);
-	printf("%s", buffer);
-
-	if(err <= 0) {
-		err = SSL_get_error(ssl ,err); 
-		fprintf(stderr, "SSL_read: %i\n", err); 
-		return -1; 
-	}
-	if(err == 0) { 
-		printf("bidirectional shutdown\n");
-		SSL_read(ssl, buffer, BUF_LEN-1); 
-	}else if(err < 0) {
-		err = SSL_get_error(ssl, err); 
-		fprintf(stderr, "SSL_read: %i\n", err); 
-		return -1; 
-	}
-	close(sock);
-	SSL_free(ssl); 
-	SSL_CTX_free(ctx);
-	return 1;
-}
-
-int ssl_connect(char *host, char *endpt) {
 	if(SSL_library_init() < 0) {
 		fprintf(stderr, "Failed to init ossl library\n");
 		return -1;
@@ -244,7 +87,6 @@ int ssl_connect(char *host, char *endpt) {
 		fprintf(stderr, "SSL_CTX object creation failed\n");
 		return -1; 
 	}
-	//SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv2);
 	//Create structure to hold data necessary for TLS/SSL comm
 	SSL *ssl = SSL_new(ctx);
 	if(ssl == NULL) {
