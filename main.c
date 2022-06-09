@@ -6,18 +6,24 @@
 #include <string.h>
 #include <unistd.h>
 #include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <openssl/bio.h>
+#include <openssl/asn1t.h>
 
 #define BUF_LEN 256
+#define OPENSSL_API_COMPAT 30100
 
-int set_socket(char *host, char *endpt, char *service); 
+int set_socket(char *host, char *service); 
 int ssl(char *host, char *endpt);
+int ssl_connect(char *host, char *endpt);
 char* get_req(char *host, char *endpt); 
+void print_err_desc(int err); 
 
 int main(int argc, char **argv) {
 	//Set URL
 	char *host = "api.fiscaldata.treasury.gov\0";
 	char *endpt = "/services/api/fiscal_service/v1/accounting/od/schedules_fed_debt_daily_activity?filter=record_date:eq:2022-05-01\0"; 
-	int err = ssl(host, endpt);
+	int err = ssl_connect(host, endpt);
 	if(err < 0) {
 		fprintf(stderr, "ssl failed\n");
 		return -1; 
@@ -70,7 +76,7 @@ int main(int argc, char **argv) {
 	return 0;
 }
 
-int set_socket(char *host, char *endpt, char *service) {
+int set_socket(char *host, char *service) {
 	int err = 0;
 	int fd = -1;
 	//Configure everything for connection to server
@@ -117,35 +123,51 @@ int ssl(char *host, char *endpt) {
 		fprintf(stderr, "Failed to negotiate ssl version\n");
 		return -1; 
 	}
-	//ctx contains cryptographic algorithms for secure speech
+	//ctx contains cryptographic algorithms for secure connection 
 	SSL_CTX *ctx = SSL_CTX_new(meth);
 	if(ctx == NULL) {
 		fprintf(stderr, "SSL_CTX object creation failed\n");
 		return -1; 
 	}
-	int err = SSL_CTX_use_PrivateKey_file(ctx, "private_key.pem",
-					      SSL_FILETYPE_PEM);
+	/*
+	//Load public key 
+	//use_certificate_file chain should be perferred
+	int err = 0;
+	char *client_cert = "certs/CA_CSR.csr\0";
+	err = SSL_CTX_use_certificate_chain_file(ctx, client_cert);
+	if(err != 1) {
+		fprintf(stderr, "Err loading certificate\n");
+		return -1;
+	}
+	//Load private key
+	char *client_key= "certs/CA_private_key.pem\0";
+	err = SSL_CTX_use_PrivateKey_file(ctx, 
+					  client_key,
+					  SSL_FILETYPE_PEM);
 	if(err != 1) {
 		fprintf(stderr, "Err reading private key file\n");
 		return -1; 
 	}
 	err = SSL_CTX_check_private_key(ctx); 
 	if(err != 1) {
-		fprintf(stderr, "Priv key does not match\
-			certificate public key\n");
+		fprintf(stderr, "Priv key != cert public key\n");
 		return -1; 
 	}
-	err = SSL_CTX_load_verify_locations(ctx, "public_key.pem", 
+	char *client_ca_cert = "certs/certificate.arm\0";
+	err = SSL_CTX_load_verify_locations(ctx, 
+					    client_ca_cert, 
 					    NULL); 
 	if(err == 0) {
-		fprintf(stderr, "Failed to locate certificate\n");
+		ERR_print_errors_fp(stderr);
 		return -1;
 	}
+	*/
+	int err = 0;
 	//Require server certificate verification
 	SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
 	SSL_CTX_set_verify_depth(ctx, 1);
 	//Create Socket
-	int sock = set_socket(host, endpt, "https\0");
+	int sock = set_socket(host, "https\0");
 	if(sock < 0) {
 		fprintf(stderr, "Failed to create socket\n");
 		return -1;
@@ -165,7 +187,9 @@ int ssl(char *host, char *endpt) {
 	err = SSL_connect(ssl); 
 	if(err <= 0) {
 		err = SSL_get_error(ssl, err); 
-		fprintf(stderr, "SSL_connect: %i\n", err); 
+		fprintf(stderr, "SSL_connect\n");
+		print_err_desc(err);
+		ERR_print_errors_fp(stderr);
 		return -1; 
 	}
 	printf("SSL connection using %s\n", SSL_get_cipher(ssl));
@@ -199,6 +223,75 @@ int ssl(char *host, char *endpt) {
 	return 1;
 }
 
+int ssl_connect(char *host, char *endpt) {
+	//Bio is an I/O abstraction from the ossl library
+	//BIO_s_file is wrapper for stdio FILE struct
+	BIO *certbio = BIO_new(BIO_s_file()); 
+	if(certbio == NULL) {
+		fprintf(stderr, "Failed to open BIO\n");
+		return -1;
+	}
+	BIO *outbio = BIO_new_fp(stdout, BIO_NOCLOSE);
+	if(outbio == NULL) {
+		fprintf(stderr, "Failed to create stream\n");
+		return -1; 
+	}
+	if(SSL_library_init() < 0) {
+		BIO_printf(outbio, "Failed to init ossl library\n");
+		return -1;
+	}
+	const SSL_METHOD *meth = TLS_client_method();
+	if(meth == NULL) {
+		fprintf(stderr, "Failed to negotiate ssl version\n");
+		return -1; 
+	}
+	//ctx contains cryptographic algorithms for secure connection 
+	SSL_CTX *ctx = SSL_CTX_new(meth);
+	if(ctx == NULL) {
+		fprintf(stderr, "SSL_CTX object creation failed\n");
+		return -1; 
+	}
+	//SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv2);
+	//Create structure to hold data necessary for TLS/SSL comm
+	SSL *ssl = SSL_new(ctx);
+	if(ssl == NULL) {
+		fprintf(stderr, "Failed to create ssl struct\n");
+		return -1;
+	}
+	int sock = set_socket(host, "https\0"); 
+	if(sock <= 0) {
+		fprintf(stderr, "Failed to create sock\n");
+		return -1;
+	}
+	int err = SSL_set_fd(ssl, sock);
+	if(err == 0) {
+		fprintf(stderr, "Failed to set sock to ssl struct\n");
+		return -1; 
+	}
+	err = SSL_connect(ssl); 
+	if(err <= 0) {
+		err = SSL_get_error(ssl, err); 
+		BIO_printf(outbio, "Error: SSL_connect\n");
+		print_err_desc(err);
+		ERR_print_errors_fp(stderr);
+	}
+	//Get remote certificate into X509 struct
+	X509 *cert = SSL_get_peer_certificate(ssl);
+	if(cert == NULL)
+		BIO_printf(outbio, 
+			   "Err no certificate from %s\n", host); 
+	X509_NAME *certname = X509_get_subject_name(cert);
+	if(certname == 0) 
+		fprintf(stderr, "Failed to get cert name\n");
+	else 
+		X509_NAME_print_ex(outbio, certname, 0, 0);
+	SSL_free(ssl);
+	close(sock);
+	X509_free(cert);
+	SSL_CTX_free(ctx);
+	return 1; 
+}
+
 char* get_req(char *host, char *endpt) {
 	char *buffer = malloc(sizeof(char) * BUF_LEN);
 	//CLRF: Moves cursor to beginning of next line
@@ -212,4 +305,36 @@ char* get_req(char *host, char *endpt) {
 		return NULL; 
 	}
 	return buffer;
+}
+
+//Switch statement cause error's can concurrently occur
+void print_err_desc(int err) {
+	switch (err) {
+		case SSL_ERROR_NONE: 
+			fprintf(stderr, 
+				"TLS/SSL I/O operation completed\n"); 
+		case SSL_ERROR_ZERO_RETURN:
+			fprintf(stderr, 
+				"Peer has closed conn for writing\n");
+		case SSL_ERROR_WANT_READ: 
+			fprintf(stderr, "ssl_err_read\n");
+		case SSL_ERROR_WANT_WRITE:
+			fprintf(stderr, "ssl_err_write\n");
+		case SSL_ERROR_WANT_CONNECT: 
+			fprintf(stderr, "ssl_want_connect\n");
+		case SSL_ERROR_WANT_ACCEPT:
+			fprintf(stderr, "ssl_want_accept\n"); 
+		case SSL_ERROR_WANT_X509_LOOKUP:
+			fprintf(stderr, "x509 lookup\n");
+		case SSL_ERROR_WANT_ASYNC:
+			fprintf(stderr, "async issue\n");
+		case SSL_ERROR_WANT_ASYNC_JOB:
+			fprintf(stderr, "async\n");
+		case SSL_ERROR_WANT_CLIENT_HELLO_CB:
+			fprintf(stderr, "callback\n");
+		case SSL_ERROR_SYSCALL: 
+			fprintf(stderr, "syscall err\n");
+		case SSL_ERROR_SSL: 
+			fprintf(stderr, "err ssl\n"); 
+	}
 }
